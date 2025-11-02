@@ -8,7 +8,9 @@ Requirements:
     pip install pandas langchain-core langchain-openai openai transformers torch
     #### Set your key in a .env file: OPENAI_API_KEY="sk-XXXX"
 """
-
+# ---------------------------
+# 1) Imports
+# ---------------------------
 import os
 import json
 from pathlib import Path
@@ -16,12 +18,9 @@ from typing import List, Dict, Any, Optional
 
 import pandas as pd
 
-# ---- PyTorch (for visibility of CUDA only; OpenAI runs via API) ----
-# try:
-#     import torch
-#     CUDA_AVAILABLE = torch.cuda.is_available()
-# except Exception:
-#     CUDA_AVAILABLE = False
+# ---------------------------
+# 2) Utilities
+# ---------------------------
 
 # ---- Hugging Face tokenizer to control prompt size ----
 try:
