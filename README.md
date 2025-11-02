@@ -1,191 +1,203 @@
-# LLM‑Powered Dividend Reconciliation (NBIM Case)
+# NBIM Dividend Reconciliation (Strict + LLM)
 
-> End-to-end prototype that detects, classifies, and explains dividend reconciliation breaks between **Custody** and **NBIM** data, featuring a local Gradio UI and an optional LLM analysis step.
+A small, production-minded demo that reconciles **Custody** vs **NBIM** dividend data using a **deterministic (strict)** pass and an **LLM enrichment** pass.  
+It supports **semicolon-separated CSVs**, **locale-aware numbers**, **date normalization with day-first inference**, and an **explicit, auditable field mapping** between the two datasets.
 
-![UI screenshot placeholder](images/UI.png)
-
----
-
-## TL;DR
-
-1. **Strict compare** Custody vs NBIM to produce a long-form `breaks_flags.csv` (one break per row).  
-2. **LLM analysis** turns those flags into human-friendly diagnostics + remediation in `breaks_analysis.csv` (one transaction per row).  
-3. **Local UI**: upload two CSVs and download results; works offline for the strict step, and uses your OpenAI key for the LLM step.
+> The UI (Gradio) runs the strict comparison first, then **automatically** runs the LLM enrichment and shows both results with download links.
 
 ---
 
-## Repo Contents
+## ✨ Features
 
-```text
+- **Deterministic “strict” comparison** with playbook-aligned tolerances
+  - Money: `±0.01`
+  - Rates: `±1e-4`
+  - Dates: exact equality after normalization to `YYYY-MM-DD`
+  - Currencies: case-insensitive equality
+- **Explicit, auditable column mapping** (no surprises from “intersection-of-columns”)
+- **Semicolon-delimited CSV** support
+- **Locale-aware numeric parsing** (e.g., `1,23` vs `1.23`, `1 234,56`, etc.)
+- **Day-first inference** for ambiguous date formats
+- **LLM enrichment** (JSON-mode, budget capped) to classify the break, explain, and propose actions + email draft
+- **Custodian display names are ignored** during comparisons by design
+
+---
+
+## 🗂 Repository layout
+
+```
 .
-├── NBIM_app.py                    # Gradio UI (run locally)
-├── strict_breaks_reconciliation.py# Deterministic “strict” comparator
-├── nbim_llm_breaks.py             # LLM-based classification & remediation
-├── llm_playbook.txt               # Domain playbook injected into prompts
-├── requirements.txt               # Python deps
-├── data/                          # (optional) place your CSVs here
-└── images/
-    └── UI.png #the screenshot above
+├── NBIM_app.py                    # Gradio UI: strict compare then auto LLM enrichment
+├── strict_breaks_reconciliation.py# Deterministic reconciliation using explicit mapping
+├── nbim_llm_breaks.py             # LLM pass: categories, severity, actions, email draft
+├── utils_io.py                    # CSV delimiter detection, locale-aware numbers, date inference, synonyms
+├── llm_playbook.txt               # Short SOP to steer the LLM
+├── requirements.txt               # Pinned, compatible versions
+└── README.md                      # This file
 ```
-
-The case background and deliverables are described in `Technology and Operations test_case_*.docx` included with the materials.
 
 ---
 
-## Features
+## 🔐 Environment variables
 
-- **Deterministic break detection** with domain-aware normalization (date/currency/number tolerance).
-- **LLM explanations**: category, severity, reason bullets, remediation steps, and optional custodian email draft.
-- **Simple local UI** to run the whole flow without touching the terminal.
-- **Works offline** for strict comparison; the LLM step is optional.
-
----
-
-## How It Works
-
-```mermaid
-flowchart LR
-  A[Custody CSV] --> C[Strict Reconciliation]
-  B[NBIM CSV] --> C
-  C -->|one break per field| D(breaks_flags.csv)
-  D --> E[LLM Analysis]
-  E -->|one row per transaction| F(breaks_analysis.csv)
-  F --> G[[Gradio UI Preview & Download]]
-```
-
-- **Strict step** (`strict_breaks_reconciliation.py`):  
-  Outer-joins on `(COAC_EVENT_KEY, BANK_ACCOUNTS)` and compares mapped business fields with normalized equality
-  (dates → `YYYY-MM-DD`, currencies → upper-case, numbers → float with small tolerance). Emits **long format** flags
-  with `BREAK_TYPE` ∈ {`mismatch`, `missing_at_custody`, `missing_at_nbim`}.
-
-- **LLM step** (`nbim_llm_breaks.py`):  
-  Groups flags per transaction and asks an LLM to return strict JSON: `reason` (bulleted), `category` (from a fixed set),
-  `severity`, `remediation_steps`, and optional `email_to_custodian`. The **Playbook** in `llm_playbook.txt` is injected
-  to keep guidance consistent.
-
-- **Local UI** (`NBIM_app.py`):  
-  Single-page app to upload two CSVs, run the pipeline, and download `breaks_analysis.csv`. The LLM step only runs if
-  `OPENAI_API_KEY` is present; otherwise the UI completes the strict step and notes that LLM was skipped.
-
----
-
-## Installation
-
-> Python **3.10+** recommended.
-
-```bash
-python -m venv .venv
-source .venv/bin/activate   # Windows: .venv\Scripts\activate
-pip install -r requirements.txt
-```
-
-Update the `OPENAI_API_KEY` to your one in the `.env` file in the project root to enable the LLM step:
+Create a `.env` file in the project root (or export in your shell):
 
 ```env
 OPENAI_API_KEY=sk-...
+
+# Optional overrides
+LLM_MODEL=gpt-4o-mini
+MAX_COST_USD=15
+INPUT_COST_PER_1K=0.005
+OUTPUT_COST_PER_1K=0.015
 ```
+
+> The LLM stage uses **OpenAI JSON mode** for robust parsing and enforces a **soft per-run budget**.  
+> If the next group would exceed the cap, that group is **skipped** with a clear note in the output.
 
 ---
 
-## Running the App (Recommended)
+## 🚀 Quickstart
 
+1) **Install dependencies**
+```bash
+pip install -r requirements.txt
+```
+
+2) **Run the app**
 ```bash
 python NBIM_app.py
 ```
 
-Then open the local URL shown in the console (defaults to `http://127.0.0.1:7860`) and:
-
-1. **Upload** your Custody and NBIM CSVs.  
-2. Click **Run**.  
-3. **Download** `breaks_analysis.csv` and review the **Preview** pane.
-
-**Note:** If no API key is set, the app still produces `breaks_flags.csv` and a minimal `breaks_analysis.csv` without LLM commentary.
+3) **Use the UI**
+- Upload the **Custody** and **NBIM** CSVs (semicolon `;` is supported automatically).
+- Click **Run Strict Compare**.
+- The app displays the strict **breaks table** and **automatically runs the LLM enrichment**, showing a second table with categories/explanations/actions and a custodian email draft.
+- Both CSV outputs are listed with file paths for download:
+  - `breaks_flags.csv`
+  - `breaks_llm.csv`
 
 ---
 
-## Programmatic Use
+## 🧮 Explicit mapping (Custody → NBIM)
+
+The project compares **exactly** these pairs for each matched `(COAC_EVENT_KEY, BANK_ACCOUNT(S))`.  
+Header **aliases** are supported (e.g., `EX_DATE` ↔ `EXDATE`, `BANK_ACCOUNT` ↔ `BANK_ACCOUNTS`).
+
+| Custody            | NBIM                      | Type      |
+|--------------------|---------------------------|-----------|
+| COAC_EVENT_KEY     | COAC_EVENT_KEY            | text      |
+| BANK_ACCOUNTS      | BANK_ACCOUNT              | text      |
+| ISIN               | ISIN                      | text      |
+| SEDOL              | SEDOL                     | text      |
+| NOMINAL_BASIS      | NOMINAL_BASIS             | text      |
+| EX_DATE            | EXDATE                    | date      |
+| PAY_DATE           | PAYMENT_DATE              | date      |
+| CURRENCIES         | QUOTATION_CURRENCY        | currency  |
+| DIV_RATE           | DIVIDENDS_PER_SHARE       | rate      |
+| TAX_RATE           | WTHTAX_RATE               | rate      |
+| GROSS_AMOUNT       | GROSS_AMOUNT_QUOTATION    | money     |
+| NET_AMOUNT_QC      | NET_AMOUNT_QUOTATION      | money     |
+| TAX                | WTHTAX_COST_QUOTATION     | money     |
+| NET_AMOUNT_SC      | NET_AMOUNT_SETTLEMENT     | money     |
+| SETTLED_CURRENCY   | SETTLEMENT_CURRENCY       | currency  |
+
+> Keys are resolved with robust aliases on **both** sides:
+> - NBIM may provide `BANK_ACCOUNTS` instead of `BANK_ACCOUNT` (and vice versa); both are recognized.
+> - Same for `EX_DATE`/`EXDATE`, `PAY_DATE`/`PAYMENT_DATE`, etc.
+
+---
+
+## 🧱 How it works
+
+### 1) Strict pass (`strict_breaks_reconciliation.py`)
+- Reads CSVs with **auto delimiter detection** (comma or semicolon).
+- Normalizes:
+  - Dates → `YYYY-MM-DD` (with **day-first** inference per column).
+  - Numbers via **locale-aware** parsing.
+  - Currencies to **upper-case**.
+- Resolves the **join keys** with aliasing:
+  - Custody: `COAC_EVENT_KEY` + `BANK_ACCOUNTS` (or `BANK_ACCOUNT`)
+  - NBIM:    `COAC_EVENT_KEY` + `BANK_ACCOUNT` (or `BANK_ACCOUNTS`)
+- Outer-joins on keys to find **missing on either side**.
+- For keys present on both sides, compares the **explicit mapping** with **type-aware** logic and tolerances.
+- Writes `breaks_flags.csv` with one row per break/missing key and a detailed **reason**.
+
+### 2) LLM enrichment (`nbim_llm_breaks.py`)
+- Groups strict breaks by `(COAC_EVENT_KEY, BANK_ACCOUNTS)`.
+- For each group, passes:
+  - The **playbook** (`llm_playbook.txt`),
+  - The **break rows** from strict,
+  - The **full row context** from both datasets.
+- Uses **OpenAI JSON mode** to return a single JSON object per group:
+  - `category` ∈ {Rounding, FX, Tax, Data entry error, Missing booking, Corporate action nuance, Unknown}
+  - `severity` ∈ {LOW, MEDIUM, HIGH}
+  - `explanation`, `proposed_actions[]`, `custodian_email_draft`
+- Writes `breaks_llm.csv`.
+
+### 3) UI (`NBIM_app.py`)
+- Upload files → click **Run Strict Compare**.
+- Shows the strict table and **auto-runs** the LLM step.
+- Shows the enriched table, with **download paths** for both CSVs.
+
+---
+
+## ⚙️ Configuration
+
+- **Tolerances** (edit in `strict_breaks_reconciliation.py`):
+  - `MONEY_TOL = 0.01`
+  - `RATE_TOL = 1e-4`
+- **Aliases / vendor header variants** (edit in `strict_breaks_reconciliation.py` under `ALIASES`).
+- **Playbook** (edit `llm_playbook.txt` or replace via `--`/env path).
+- **Model & budget**: override via `.env` or the UI fields.
+
+---
+
+## 🧪 CLI / Headless usage (optional)
+
+You can call the building blocks directly from Python:
 
 ```python
 from pathlib import Path
 from strict_breaks_reconciliation import reconcile_breaks
 from nbim_llm_breaks import run_llm_break_analysis
 
-breaks_csv = Path("breaks_flags.csv")
+# Strict reconciliation
+strict_csv = reconcile_breaks(Path("custody.csv"), Path("nbim.csv"))
 
-# 1) strict compare (offline)
-reconcile_breaks(
-    custody_csv=Path("data/CUSTODY_Dividend_Bookings.csv"),
-    nbim_csv=Path("data/NBIM_Dividend_Bookings.csv"),
-    out_csv=breaks_csv
-)  # -> breaks_flags.csv
-
-# 2) LLM analysis (requires OPENAI_API_KEY)
-run_llm_break_analysis(
-    breaks_flags_path=str(breaks_csv),
-    out_csv="breaks_analysis.csv",
+# LLM enrichment
+enriched_csv = run_llm_break_analysis(
+    breaks_csv=strict_csv,
+    custody_csv=Path("custody.csv"),
+    nbim_csv=Path("nbim.csv"),
     model="gpt-4o-mini",
-    temperature=0.0
-)  # -> breaks_analysis.csv
+    max_cost_usd=15,
+)
 ```
 
 ---
 
-## Data Contract (Column Mapping)
+## 🧯 Troubleshooting
 
-Business field mapping used for comparison (example subset):
+- **“Missing required key column 'BANK_ACCOUNT'”**  
+  NBIM may export `BANK_ACCOUNTS` instead of `BANK_ACCOUNT`. The resolver treats both as equivalent on **either** side. If you still see this, verify the header row is intact and not shifted by a wrong delimiter (the project auto-detects semicolons).
 
-| Business          | Custody column            | NBIM column                |
-|-------------------|---------------------------|----------------------------|
-| COAC_EVENT_KEY    | COAC_EVENT_KEY            | COAC_EVENT_KEY             |
-| BANK_ACCOUNTS     | BANK_ACCOUNTS             | BANK_ACCOUNT               |
-| EX_DATE           | EX_DATE                   | EXDATE                     |
-| PAY_DATE          | PAY_DATE                  | PAYMENT_DATE               |
-| CURRENCIES        | CURRENCIES                | QUOTATION_CURRENCY         |
-| DIV_RATE          | DIV_RATE                  | DIVIDENDS_PER_SHARE        |
-| TAX_RATE          | TAX_RATE                  | WTHTAX_RATE                |
-| GROSS_AMOUNT      | GROSS_AMOUNT              | GROSS_AMOUNT_QUOTATION     |
-| NET_AMOUNT_QC     | NET_AMOUNT_QC             | NET_AMOUNT_QUOTATION       |
-| TAX               | TAX                       | WTHTAX_COST_QUOTATION      |
-| NET_AMOUNT_SC     | NET_AMOUNT_SC             | NET_AMOUNT_SETTLEMENT      |
-| SETTLED_CURRENCY  | SETTLED_CURRENCY          | SETTLEMENT_CURRENCY        |
+- **“Dates look swapped (MM/DD vs DD/MM)”**  
+  The reader infers **day-first** per column. If your data is very sparse/ambiguous, set a fixed policy by coercing the date columns before calling strict.
+
+- **“The LLM step stopped early”**  
+  You likely hit the **budget cap**. Increase `MAX_COST_USD` in `.env` or the UI and re-run.
 
 ---
 
-## Outputs
+## 🔒 Security & privacy
 
-- **`breaks_flags.csv`** — long format, one row per field-level break:  
-  `COAC_EVENT_KEY, BANK_ACCOUNTS, BREAK_TYPE, COLUMN, CUSTODY_VALUE, NBIM_VALUE`
-
-- **`breaks_analysis.csv`** — one row per transaction (after LLM step):  
-  `CATEGORY, SEVERITY, REASON (bulleted), REMEDIATION_STEPS (bulleted), EMAIL_TO_CUSTODIAN`
+- The LLM step sends only the necessary rows & metadata for the selected break groups.  
+- Avoid uploading personally identifiable information; mask/redact if needed.  
+- Use a separate API key with minimum privileges and rotate regularly.
 
 ---
 
-## Prompting & Guardrails (LLM Step)
+## 📝 License
 
-- System prompt frames the model as a **senior operations analyst for equity dividends**.
-- The **Playbook** provides actionable tips (rounding, FX, WHT, record/ex dates, settlement currency).
-- Fixed taxonomy for `category` and `severity` + temperature `0.0` for determinism.
-- The strict comparator remains the source of truth; LLM cannot force-match records.
-
----
-
-## Troubleshooting
-
-- **No LLM output** → set `OPENAI_API_KEY` in `.env` or your shell env.  
-- **CSV parse issues** → ensure clean separators (`, ; | \t`) and UTF‑8/CP‑1252 encodings.  
-- **Dependency issues** → update `pip` and re-run `pip install -r requirements.txt`.
-
----
-
-## Roadmap
-
-- Pass full-row context into LLM from the UI for richer diagnostics.
-- Add multi‑tranche event handling and ADR fee logic in the strict step.
-- Optional agentic workflow (auto-open tickets, custodian email drafts → Outbox queue).
-
----
-
-## License
-
-Proprietary / for NBIM case evaluation.
+MIT — see `LICENSE` (or adapt to your policy).

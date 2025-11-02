@@ -1,8 +1,9 @@
-pandas=2.3.3
-numpy=2.3.3
-gradio=5.49.1
-python-dotenv=1.2.1
-langchain-core=1.0.2
-langchain-openai=1.0.1
-openai=2.6.1
-transformers=4.57.1
+numpy==2.3.3
+pandas==2.2.2
+gradio==4.44.0
+python-dotenv==1.0.1
+openai==1.37.1
+tiktoken==0.7.0
+langchain-core==0.3.8
+langchain-openai==0.2.3
+pydantic==2.8.2

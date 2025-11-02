@@ -1,191 +1,128 @@
-"""
-Gradio UI for Dividend Reconciliation (Local)
----------------------------------------------
-Upload Custody & NBIM CSVs → get the final breaks_analysis.csv
-and display its content with each row formatted as:
+"""NBIM_app.py
+Gradio UI for strict reconciliation + automatic LLM enrichment.
 
-[COLUMN_NAME] : value
+What this app does (end-to-end):
+1) Accepts two CSV uploads (Custody & NBIM). The CSVs may be semicolon-delimited.
+2) Runs a deterministic/strict reconciliation producing a breaks CSV (breaks_flags.csv).
+3) Automatically runs an LLM-based enrichment on the breaks to classify / explain / propose actions.
+4) Displays both strict and LLM tables in the UI and exposes download paths for each CSV.
 
-(with a blank line between rows)
-"""
+Notes:
+- We load environment variables (e.g., OPENAI_API_KEY) via python-dotenv so the LLM stage can run.
+- The 'strict' stage handles locale-aware numbers and date normalization via utils_io.
+- The LLM stage is budget-capped and uses JSON mode to produce structured outputs.
+-----------------------------------------------------------------------------"""
 
-import os
-import shutil
+from __future__ import annotations
 from pathlib import Path
-from datetime import datetime
-from uuid import uuid4
-import traceback
 import pandas as pd
 import gradio as gr
 
-# Loading the OpenAI API Key from the .env file
+from strict_breaks_reconciliation import reconcile_breaks
+from nbim_llm_breaks import run_llm_break_analysis
+
+# Load the OpenAI API Key (and other envs) from a local .env file, if present.
 from dotenv import load_dotenv
 load_dotenv()
 
-# Import the two pipeline scripts in the same folder:
-try:
-    import strict_breaks_reconciliation as sbr
-except Exception as e:
-    raise ImportError(
-        "Could not import 'strict_breaks_reconciliation'. "
-        "Ensure strict_breaks_reconciliation.py is in the same folder."
-    ) from e
 
-try:
-    from nbim_llm_breaks import run_llm_break_analysis
-except Exception as e:
-    raise ImportError(
-        "Could not import 'nbim_llm_breaks'. "
-        "Ensure nbim_llm_breaks.py is in the same folder."
-    ) from e
-
-
-def _ensure_dir(p: Path):
-    p.mkdir(parents=True, exist_ok=True)
-
-
-def _format_breaks_for_display(csv_path: Path) -> str:
+def run_strict(custody_file, nbim_file):
+    """Run the strict comparator and return (DataFrame, status_message, breaks_csv_path, custody_path, nbim_path).
+    
+    Gradio calls this with two UploadedFile objects. We convert them to pathlib.Path,
+    run the deterministic reconciliation, then read the resulting CSV for display.
     """
-    Reads breaks_analysis.csv and returns a human-friendly multi-line string:
-    [COLUMN] : value
-    ...
-    <blank line>
-    [COLUMN] : value
-    ...
-    """
-    if not csv_path.exists():
-        return "No analysis file found."
+    if custody_file is None or nbim_file is None:
+        return None, "Please upload both Custody and NBIM CSV files.", None, None, None
 
-    df = pd.read_csv(csv_path)
-    if df.empty:
-        return "breaks_analysis.csv is empty (no transactions analyzed)."
+    # Where the uploaded temp files live on disk (Gradio handles the temp pathing)
+    custody_path = Path(custody_file.name)
+    nbim_path = Path(nbim_file.name)
 
-    lines = []
-    # Preserve column order from the CSV
-    cols = list(df.columns)
-
-    for _, row in df.iterrows():
-        for c in cols:
-            val = row.get(c, "")
-            # Render NaN as empty string
-            val = "" if pd.isna(val) else str(val)
-            lines.append(f"[{c}] : {val}")
-        # blank line between breaks
-        lines.append("")
-    return "\n".join(lines)
-
-
-def process_pipeline(custody_file, nbim_file, model_name, temperature):
-    """
-    Orchestrates the pipeline:
-    - Saves uploads
-    - strict reconciliation -> breaks_flags.csv
-    - LLM analysis -> breaks_analysis.csv
-    Returns:
-      (analysis_file_path or None, logs_str, formatted_display_str)
-    """
-    log_lines = []
-    ts = datetime.now().strftime("%Y%m%d-%H%M%S")
-    run_id = f"ui_run_{ts}_{uuid4().hex[:8]}"
-    workdir = Path("./ui_runs") / run_id
-    _ensure_dir(workdir)
-
+    # The strict comparator writes to this path next to the upload
+    out_path = custody_path.parent / "breaks_flags.csv"
     try:
-        # Validate uploads
-        if custody_file is None or nbim_file is None:
-            return None, "❌ Please upload BOTH Custody and NBIM CSV files.", ""
-
-        custody_path = workdir / "custody.csv"
-        nbim_path = workdir / "nbim.csv"
-        shutil.copyfile(custody_file, custody_path)
-        shutil.copyfile(nbim_file, nbim_path)
-        log_lines.append(f"📥 Inputs saved to: {workdir}")
-
-        # Step 1: Strict breaks reconciliation
-        breaks_flags_path = workdir / "breaks_flags.csv"
-        log_lines.append("🔎 Running strict reconciliation ...")
-        sbr.reconcile_breaks(custody_path, nbim_path, breaks_flags_path)
-        log_lines.append(f"✅ Created: {breaks_flags_path.name}")
-
-        # Step 2: LLM analysis -> breaks_analysis.csv
-        if not os.getenv("OPENAI_API_KEY"):
-            log_lines.append("⚠️ OPENAI_API_KEY not set — cannot run the LLM step.")
-            log_lines.append("   Set it and rerun (Windows PowerShell): setx OPENAI_API_KEY \"sk-...\"")
-            return None, "\n".join(log_lines), ""
-
-        analysis_out = workdir / "breaks_analysis.csv"
-        log_lines.append(f"🤖 Running LLM analysis: model={model_name}, T={temperature}")
-        run_llm_break_analysis(
-            breaks_flags_path=str(breaks_flags_path),
-            out_csv=str(analysis_out),
-            model=model_name,
-            temperature=float(temperature),
-        )
-        log_lines.append(f"✅ Final file ready: {analysis_out.name}")
-        log_lines.append("🎉 Done.")
-
-        # Format for display
-        pretty_text = _format_breaks_for_display(analysis_out)
-
-        return str(analysis_out), "\n".join(log_lines), pretty_text
-
+        out_csv = reconcile_breaks(custody_path, nbim_path, out_path)
+        df = pd.read_csv(out_csv)
+        # Return the table to render, a status line, the path to CSV, and echo the inputs
+        return df, f"Saved: {out_csv}", str(out_csv), custody_path, nbim_path
     except Exception as e:
-        tb = traceback.format_exc()
-        log_lines.append("❌ Error during processing:")
-        log_lines.append(str(e))
-        log_lines.append(tb)
-        return None, "\n".join(log_lines), ""
+        # Return a clear error message (and clear the extra outputs)
+        return None, f"Error: {e}", None, None, None
 
 
-# ---------------- Gradio UI ---------------- #
-with gr.Blocks(title="Dividend Reconciliation – Local") as demo:
+def run_llm(breaks_csv_path, custody_path, nbim_path, budget_usd, model):
+    """Run the LLM enrichment on the strict CSV and return (DataFrame, status_message, llm_csv_path).
+    
+    This is chained to run automatically right after 'run_strict'. We pass the same
+    data files for row-level context so the LLM can reason with full evidence.
+    """
+    if not breaks_csv_path:
+        return None, "Run the strict reconciliation first.", None
+
+    out_path = Path(breaks_csv_path).parent / "breaks_llm.csv"
+    try:
+        out_csv = run_llm_break_analysis(
+            breaks_csv=Path(breaks_csv_path),
+            custody_csv=custody_path,
+            nbim_csv=nbim_path,
+            out_csv=out_path,
+            model=model,
+            max_cost_usd=float(budget_usd),
+        )
+        df = pd.read_csv(out_csv)
+        return df, f"Saved: {out_csv}", str(out_csv)
+    except Exception as e:
+        return None, f"Error: {e}", None
+
+
+# ---------------------------
+# Gradio UI wiring
+# ---------------------------
+with gr.Blocks(title="NBIM Dividend Reconciliation") as demo:
     gr.Markdown(
-        """
-        # Dividend Reconciliation (Local UI)
-        Upload the **Custody** and **NBIM** CSVs.  
-        Click **Run** to generate **breaks_analysis.csv** and preview its contents below.
-        """
+        "## NBIM Dividend Reconciliation\n"
+        "Upload Custody & NBIM CSVs. Click **Run Strict Compare** — the LLM Enrichment "
+        "will run automatically right after the strict breaks appear."
     )
 
+    # CSV uploads
     with gr.Row():
-        custody_input = gr.File(label="Custody CSV", file_types=[".csv"])
-        nbim_input = gr.File(label="NBIM CSV", file_types=[".csv"])
+        custody_in = gr.File(label="Custody CSV", file_types=[".csv"])  # semicolons supported under the hood
+        nbim_in    = gr.File(label="NBIM CSV", file_types=[".csv"])
 
-    with gr.Accordion("Advanced (LLM)", open=False):
-        model_name = gr.Textbox(
-            label="OpenAI model",
-            value="gpt-4o-mini",
-            info="OpenAI model used for explanations (requires OPENAI_API_KEY)",
-        )
-        temperature = gr.Slider(
-            label="Temperature",
-            minimum=0.0, maximum=1.0, step=0.1, value=0.0
-        )
-
-    run_btn = gr.Button("Run", variant="primary")
-
+    # LLM config row
     with gr.Row():
-        analysis_file = gr.File(label="Download: breaks_analysis.csv", interactive=False)
+        budget = gr.Number(value=15, label="Max LLM budget (USD)")  # soft cap; the LLM step will skip groups if exceeded
+        model  = gr.Textbox(value="gpt-4o-mini", label="Model")     # can be overridden in .env too
 
-    with gr.Row():
-        # Large textbox to show formatted breaks with blank lines between them
-        preview_box = gr.Textbox(
-            label="Preview: breaks_analysis content",
-            lines=24,
-            interactive=False
-        )
+    # Strict comparator outputs
+    strict_btn = gr.Button("Run Strict Compare")
+    strict_status = gr.Markdown("")  # will show 'Saved: <path>' or error
+    strict_table  = gr.Dataframe(headers=None, wrap=True, label="Breaks (strict)")
+    strict_dl     = gr.Textbox(label="breaks_flags.csv path", interactive=False)
 
-    logs_box = gr.Textbox(label="Logs", lines=12, interactive=False)
+    # Hidden holders to pass input file paths into the LLM step automatically
+    custody_path_box = gr.Textbox(visible=False)
+    nbim_path_box    = gr.Textbox(visible=False)
 
-    def _on_run(custody, nbim, mdl, temp):
-        out_path, logs, pretty_text = process_pipeline(custody, nbim, mdl, temp)
-        return out_path, pretty_text, logs
+    # LLM outputs (auto-run)
+    llm_status = gr.Markdown("")
+    llm_table  = gr.Dataframe(headers=None, wrap=True, label="Breaks (LLM categories)")
+    llm_dl     = gr.Textbox(label="breaks_llm.csv path", interactive=False)
 
-    run_btn.click(
-        _on_run,
-        inputs=[custody_input, nbim_input, model_name, temperature],
-        outputs=[analysis_file, preview_box, logs_box],
+    # Clicking strict kicks off strict; THEN we chain .then(...) to auto-run the LLM
+    strict_btn.click(
+        run_strict,
+        inputs=[custody_in, nbim_in],
+        outputs=[strict_table, strict_status, strict_dl, custody_path_box, nbim_path_box]
+    ).then(
+        run_llm,
+        inputs=[strict_dl, custody_path_box, nbim_path_box, budget, model],
+        outputs=[llm_table, llm_status, llm_dl]
     )
+
 
 if __name__ == "__main__":
-    demo.launch(server_name="127.0.0.1", server_port=7860, inbrowser=True)
+    # Launch the Gradio server (defaults to localhost; set share=True if you need a public URL during demos)
+    demo.launch()

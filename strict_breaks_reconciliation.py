@@ -1,245 +1,265 @@
-"""
-Strict Breaks Reconciliation
-----------------------------
-Compares Custody vs NBIM dividend data using an explicit column dictionary.
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+# -----------------------------------------------------------------------------
+# strict_breaks_reconciliation.py
+# Strict (deterministic) reconciliation using explicit column mapping.
+#
+# Responsibilities:
+# - Read semicolon- or comma-delimited CSVs; normalize dates, numbers and currencies.
+# - Join datasets on (COAC_EVENT_KEY, BANK_ACCOUNTS/ACCOUNT) with robust aliasing.
+# - Compare EXACTLY the column pairs provided by the business (see COMPARE_MAP).
+# - Produce 'breaks_flags.csv' with: status, mismatch reasons, and which pairs failed.
+#
+# Key design choices:
+# - We avoid comparing "custodian name" type fields (handled upstream in utils_io for general comparisons).
+# - Explicit mapping is used instead of "column intersection" so we never miss a requested field pair.
+# - Aliases are symmetric where appropriate so variations (e.g., EX_DATE vs EXDATE) are recognized.
+# - Type-aware comparison: dates exact post-normalization; currencies case-insensitive;
+#   money with ±0.01 tolerance; rates with ±1e-4.
+# -----------------------------------------------------------------------------
 
-Definition of a break:
-- "mismatch": a (COAC_EVENT_KEY, BANK_ACCOUNTS) pair exists in BOTH files, and at least one of the
-  mapped columns (excluding the keys) differs after sensible normalization (dates, numbers, currency case).
-- "missing at Custody": a key pair appears only in NBIM.
-- "missing at NBIM": a key pair appears only in Custody.
-
-Output: a CSV with columns:
-- COAC_EVENT_KEY
-- BANK_ACCOUNTS
-- BREAK_TYPE  (mismatch | missing at Custody | missing at NBIM)
-- COLUMN       (for mismatches: the business column name; for missing rows: '')
-- CUSTODY_VALUE
-- NBIM_VALUE
-
-Usage (from the folder with your CSVs):
-    python strict_breaks_reconciliation.py \
-        --custody "CUSTODY_Dividend_Bookings 1 (2).csv" \
-        --nbim "NBIM_Dividend_Bookings 1 (2).csv" \
-        --out "breaks_flags.csv"
-
-Notes:
-- The script is resilient to separators and encodings.
-- It standardizes headers to UPPERCASE to match the dictionary exactly.
-- Numeric/date/currency normalization reduces false positives while remaining strict.
-"""
-
-# ---------------------------
-# 1) Imports
-# ---------------------------
+from __future__ import annotations
 from pathlib import Path
 import pandas as pd
-import numpy as np
-from typing import Dict, List, Tuple, Any, Set
 
+from utils_io import (
+    KEY_COAC, KEY_BANK,
+    read_csv_smart, normalize_dataframe
+)
 
-# ---------------------------
-# 2) Utilities
-# ---------------------------
-def robust_read_csv(path: Path) -> pd.DataFrame:
-    trials: List[Tuple[str, str]] = []
-    for sep in [",", ";", "|", "\t"]:
-        for enc in ["utf-8-sig", "utf-8", "cp1252", "latin1"]:
-            try:
-                df = pd.read_csv(path, sep=sep, encoding=enc)
-                # Heuristic: if single column with many separators inside, keep trying
-                if df.shape[1] == 1 and df.iloc[:5, 0].astype(str).str.contains(sep).any():
-                    trials.append((sep, enc))
-                    continue
-                return df
-            except Exception:
-                trials.append((sep, enc))
-    raise RuntimeError(f"Unable to read {path}. Tried separators/encodings like: {trials[:4]} ...")
+# ---------------------
+# Tolerances
+# ---------------------
+MONEY_TOL = 0.01  # in quotation/settlement currency; aligns to the playbook
+SHARE_TOL = 1e-6  # kept for completeness when comparing share-like fields
+RATE_TOL  = 1e-4  # for rates/percentages
 
-def standardize_headers(df: pd.DataFrame) -> pd.DataFrame:
-    df = df.copy()
-    df.columns = [str(c).strip().upper() for c in df.columns]
-    return df
+# ---------------------
+# Explicit business mapping (Custody, NBIM, type)
+# ---------------------
+# 'type' controls comparison logic: one of {'text','date','currency','rate','money'}
+COMPARE_MAP = [
+    ("COAC_EVENT_KEY", "COAC_EVENT_KEY", "text"),
+    ("BANK_ACCOUNTS",  "BANK_ACCOUNT",  "text"),
+    ("ISIN",           "ISIN",          "text"),
+    ("SEDOL",          "SEDOL",         "text"),
+    ("NOMINAL_BASIS",  "NOMINAL_BASIS", "text"),
+    ("EX_DATE",        "EXDATE",        "date"),
+    ("PAY_DATE",       "PAYMENT_DATE",  "date"),
+    ("CURRENCIES",     "QUOTATION_CURRENCY", "currency"),
+    ("DIV_RATE",       "DIVIDENDS_PER_SHARE", "rate"),
+    ("TAX_RATE",       "WTHTAX_RATE",   "rate"),
+    ("GROSS_AMOUNT",   "GROSS_AMOUNT_QUOTATION", "money"),
+    ("NET_AMOUNT_QC",  "NET_AMOUNT_QUOTATION",   "money"),
+    ("TAX",            "WTHTAX_COST_QUOTATION",  "money"),
+    ("NET_AMOUNT_SC",  "NET_AMOUNT_SETTLEMENT",  "money"),
+    ("SETTLED_CURRENCY","SETTLEMENT_CURRENCY",   "currency"),
+]
 
-def ensure_columns(df: pd.DataFrame, cols: List[str], origin: str):
-    missing = [c for c in cols if c not in df.columns]
-    if missing:
-        raise KeyError(f"{origin} missing required columns: {missing}")
+# ---------------------
+# Header aliases (symmetric where useful)
+# ---------------------
+ALIASES = {
+    # Keys
+    "BANK_ACCOUNTS": ["BANK_ACCOUNT","BANK_ACCT","ACCOUNT","ACCT"],
+    "BANK_ACCOUNT":  ["BANK_ACCOUNTS","BANK_ACCT","ACCOUNT","ACCT"],
+    "COAC_EVENT_KEY":["COAC KEY","EVENT_KEY","EVENT ID","COACKEY","COAC-EVENT-KEY"],
 
-def to_date_str(v: Any) -> str:
-    if pd.isna(v): return ""
-    # Try parse with pandas
-    try:
-        dt = pd.to_datetime(v, errors="coerce", dayfirst=False)
-        if pd.isna(dt): return str(v).strip()
-        return dt.strftime("%Y-%m-%d")
-    except Exception:
-        return str(v).strip()
+    # Dates & currencies
+    "EX_DATE": ["EXDATE","EX-DATE","EX DATE"],
+    "EXDATE":  ["EX_DATE","EX-DATE","EX DATE"],
+    "PAY_DATE": ["PAYMENT_DATE","PAYDATE","PAY DATE"],
+    "PAYMENT_DATE": ["PAY_DATE","PAYDATE","PAY DATE"],
+    "CURRENCIES": ["QUOTATION_CURRENCY","CURRENCY","QUOTATIONCURRENCY"],
+    "QUOTATION_CURRENCY": ["CURRENCIES","QUOTATIONCURRENCY","CCY_QUOTE"],
 
-def to_numeric(v: Any) -> float:
-    if pd.isna(v) or v == "": return np.nan
-    # remove common thousands/space
-    s = str(v).replace(",", "").strip()
-    try:
-        return float(s)
-    except Exception:
-        return np.nan
+    # Amounts & rates
+    "DIV_RATE": ["DIVIDENDS_PER_SHARE","DIVIDEND_PER_SHARE","DIV_PER_SHARE","DIV_PER_SHR","DIVIDENDSPS","DIVPS"],
+    "DIVIDENDS_PER_SHARE": ["DIV_RATE","DIV_PER_SHARE","DIV_PER_SHR","DIVPS"],
+    "TAX_RATE": ["WTHTAX_RATE","WITHHOLDING_TAX_RATE"],
+    "WTHTAX_RATE": ["TAX_RATE","WITHHOLDING_TAX_RATE"],
+    "GROSS_AMOUNT": ["GROSS_AMOUNT_QUOTATION","GROSS_AMOUNT_QC","GROSS_QC"],
+    "GROSS_AMOUNT_QUOTATION": ["GROSS_AMOUNT","GROSS_AMOUNT_QC","GROSS_QC"],
+    "NET_AMOUNT_QC": ["NET_AMOUNT_QUOTATION","NET_QC"],
+    "NET_AMOUNT_QUOTATION": ["NET_AMOUNT_QC","NET_QC"],
+    "TAX": ["WTHTAX_COST_QUOTATION","WTHTAX_QUOTATION","TAX_COST_QC"],
+    "WTHTAX_COST_QUOTATION": ["TAX","WTHTAX_QUOTATION","TAX_COST_QC"],
+    "NET_AMOUNT_SC": ["NET_AMOUNT_SETTLEMENT","NET_SC","NET_SETTLEMENT"],
+    "NET_AMOUNT_SETTLEMENT": ["NET_AMOUNT_SC","NET_SC","NET_SETTLEMENT"],
+    "SETTLED_CURRENCY": ["SETTLEMENT_CURRENCY","SETTLED_CCY","SETTLEMENT_CCY"],
+    "SETTLEMENT_CURRENCY": ["SETTLED_CURRENCY","SETTLED_CCY","SETTLEMENT_CCY"],
+}
 
-def equal_numeric(a: Any, b: Any, tol: float) -> bool:
-    fa, fb = to_numeric(a), to_numeric(b)
-    if np.isnan(fa) and np.isnan(fb): return True
-    if np.isnan(fa) or np.isnan(fb): return False
-    return abs(fa - fb) <= tol
+def _canon(s: str) -> str:
+    """Canonicalize a column label by uppercasing and stripping non-alphanumerics.
+    This helps match headers like 'EX-DATE' vs 'EX_DATE' vs 'exdate'."""
+    return "".join(ch for ch in s.upper() if ch.isalnum())
 
-def equal_date(a: Any, b: Any) -> bool:
-    return to_date_str(a) == to_date_str(b)
+def _find_col(df: pd.DataFrame, desired: str) -> str | None:
+    """Find the best-matching column in df for the desired header using several passes:
+    1) Exact match
+    2) Case-insensitive exact
+    3) Alias-based (symmetric) search
+    4) Canonical form (uppercase alnum only) search
+    Returns the actual df column name or None if not found.
+    """
+    # 1) exact
+    if desired in df.columns:
+        return desired
+    # 2) case-insensitive exact
+    lower_map = {c.lower(): c for c in df.columns}
+    if desired.lower() in lower_map:
+        return lower_map[desired.lower()]
+    # 3) alias-based (symmetric)
+    cands = [desired] + ALIASES.get(desired.upper(), [])
+    for cand in cands:
+        if cand in df.columns:
+            return cand
+        if cand.lower() in lower_map:
+            return lower_map[cand.lower()]
+    # 4) canonical form (remove non-alnum)
+    canon_map = {_canon(c): c for c in df.columns}
+    for cand in cands:
+        cc = _canon(cand)
+        if cc in canon_map:
+            return canon_map[cc]
+    return None
 
-def equal_currency(a: Any, b: Any) -> bool:
-    sa = "" if pd.isna(a) else str(a).strip().upper()
-    sb = "" if pd.isna(b) else str(b).strip().upper()
-    return sa == sb
+def _values_equal_by_type(v1, v2, kind: str) -> bool:
+    """Type-aware equality with tolerances where relevant."""
+    if kind == "money":
+        try:
+            f1 = float(v1) if v1 == v1 else float("nan")
+            f2 = float(v2) if v2 == v2 else float("nan")
+        except Exception:
+            return False
+        if pd.isna(f1) and pd.isna(f2): return True
+        if pd.isna(f1) or pd.isna(f2):  return False
+        return abs(f1 - f2) <= MONEY_TOL
+    if kind == "rate":
+        try:
+            f1 = float(v1) if v1 == v1 else float("nan")
+            f2 = float(v2) if v2 == v2 else float("nan")
+        except Exception:
+            return False
+        if pd.isna(f1) and pd.isna(f2): return True
+        if pd.isna(f1) or pd.isna(f2):  return False
+        return abs(f1 - f2) <= RATE_TOL
+    if kind == "date":
+        s1 = "" if pd.isna(v1) else str(v1)
+        s2 = "" if pd.isna(v2) else str(v2)
+        # Dates are normalized upstream to YYYY-MM-DD
+        return s1 == s2
+    if kind == "currency":
+        s1 = "" if pd.isna(v1) else str(v1).strip().upper()
+        s2 = "" if pd.isna(v2) else str(v2).strip().upper()
+        return s1 == s2
+    # text default (trimmed string comparison)
+    s1 = "" if pd.isna(v1) else str(v1).strip()
+    s2 = "" if pd.isna(v2) else str(v2).strip()
+    return s1 == s2
 
-def equal_text(a: Any, b: Any) -> bool:
-    sa = "" if pd.isna(a) else str(a).strip()
-    sb = "" if pd.isna(b) else str(b).strip()
-    return sa == sb
+def reconcile_breaks(custody_csv: Path, nbim_csv: Path, out_csv: Path = Path("breaks_flags.csv")) -> Path:
+    """Run the strict reconciliation and persist a 'breaks_flags.csv' file.
+    
+    Steps:
+    1) Read both files (semicolon-aware), normalize dates/numbers/currencies.
+    2) Resolve the join keys with robust aliasing:
+       - Custody:  COAC_EVENT_KEY + BANK_ACCOUNTS (or BANK_ACCOUNT)
+       - NBIM:     COAC_EVENT_KEY + BANK_ACCOUNT (or BANK_ACCOUNTS)
+    3) Outer-join on the resolved keys to detect missing keys on either side.
+    4) For rows present on both sides, compare the explicit pairs in COMPARE_MAP.
+    5) Write a tidy CSV with one row per break or missing key.
+    """
+    # 1) Read and normalize
+    custody_raw = read_csv_smart(Path(custody_csv))
+    nbim_raw    = read_csv_smart(Path(nbim_csv))
+    custody = normalize_dataframe(custody_raw)
+    nbim    = normalize_dataframe(nbim_raw)
 
-def values_equal(field: str, custody_val: Any, nbim_val: Any, DATE_FIELDS : Set[str], CURRENCY_FIELDS : Set[str], NUMERIC_FIELDS : Set[str], NUM_TOL : float) -> bool:
-    if field in DATE_FIELDS:
-        return equal_date(custody_val, nbim_val)
-    if field in CURRENCY_FIELDS:
-        return equal_currency(custody_val, nbim_val)
-    if field in NUMERIC_FIELDS:
-        return equal_numeric(custody_val, nbim_val, tol=NUM_TOL)
-    # default textual compare
-    return equal_text(custody_val, nbim_val)
+    # 2) Resolve join keys with aliases
+    cust_key1 = _find_col(custody, "COAC_EVENT_KEY") or "COAC_EVENT_KEY"
+    cust_key2 = _find_col(custody, "BANK_ACCOUNTS") or _find_col(custody, "BANK_ACCOUNT") or "BANK_ACCOUNTS"
+    nbim_key1 = _find_col(nbim, "COAC_EVENT_KEY") or "COAC_EVENT_KEY"
+    nbim_key2 = _find_col(nbim, "BANK_ACCOUNT")   or _find_col(nbim, "BANK_ACCOUNTS") or "BANK_ACCOUNT"
 
-# ---------------------------
-# 3) Core logic
-# ---------------------------
-def reconcile_breaks(custody_csv: Path, nbim_csv: Path, out_csv: Path = "breaks_flag.csv") -> str:
-    COLUMN_DICT: Dict[str, List[str]] = {
-        "COAC_EVENT_KEY" : ["COAC_EVENT_KEY", "COAC_EVENT_KEY"],
-        "BANK_ACCOUNTS"  : ["BANK_ACCOUNTS", "BANK_ACCOUNT"],
-        "ISIN"           : ["ISIN", "ISIN"],
-        "SEDOL"          : ["SEDOL", "SEDOL"],
-        "NOMINAL_BASIS"  : ["NOMINAL_BASIS", "NOMINAL_BASIS"],
-        "EX_DATE"        : ["EX_DATE", "EXDATE"],
-        "PAY_DATE"       : ["PAY_DATE", "PAYMENT_DATE"],
-        "CURRENCIES"     : ["CURRENCIES", "QUOTATION_CURRENCY"],
-        "DIV_RATE"       : ["DIV_RATE", "DIVIDENDS_PER_SHARE"],
-        "TAX_RATE"       : ["TAX_RATE", "WTHTAX_RATE"],
-        "GROSS_AMOUNT"   : ["GROSS_AMOUNT", "GROSS_AMOUNT_QUOTATION"],
-        "NET_AMOUNT_QC"  : ["NET_AMOUNT_QC", "NET_AMOUNT_QUOTATION"],
-        "TAX"            : ["TAX", "WTHTAX_COST_QUOTATION"],
-        "NET_AMOUNT_SC"  : ["NET_AMOUNT_SC", "NET_AMOUNT_SETTLEMENT"],
-        "SETTLED_CURRENCY": ["SETTLED_CURRENCY", "SETTLEMENT_CURRENCY"],
-    }
+    # Guardrails: ensure keys exist in each df before joining
+    for dfname, df, k1, k2 in [
+        ("Custody", custody, cust_key1, cust_key2),
+        ("NBIM", nbim, nbim_key1, nbim_key2),
+    ]:
+        for key in (k1, k2):
+            if key not in df.columns:
+                raise ValueError(f"{dfname} file missing required key column '{key}'. Got columns: {list(df.columns)}")
 
-    # Business types for smarter normalization (still strict)
-    DATE_FIELDS = {"EX_DATE", "PAY_DATE"}
-    CURRENCY_FIELDS = {"CURRENCIES", "SETTLED_CURRENCY"}
-    NUMERIC_FIELDS = {
-        "DIV_RATE", "TAX_RATE", "GROSS_AMOUNT", "NET_AMOUNT_QC", "TAX", "NET_AMOUNT_SC",
-        "NOMINAL_BASIS"  # often numeric, include for safety
-    }
-    # Tolerance for floats (kept very small so it's effectively strict but avoids 0.30000004)
-    NUM_TOL = 1e-9
+    # 3) Create normalized join columns and outer-join on keys
+    csmall = custody.copy()
+    nsmall = nbim.copy()
+    csmall[KEY_COAC] = csmall[cust_key1]
+    csmall[KEY_BANK] = csmall[cust_key2]
+    nsmall[KEY_COAC] = nsmall[nbim_key1]
+    nsmall[KEY_BANK] = nsmall[nbim_key2]
 
-    # Read
-    df_c = robust_read_csv(custody_csv)
-    df_n = robust_read_csv(nbim_csv)
-
-    # Uppercase headers to match dictionary exactly
-    df_c = standardize_headers(df_c)
-    df_n = standardize_headers(df_n)
-
-    # Validate presence of mapped columns
-    custody_required = [v[0] for v in COLUMN_DICT.values()]
-    nbim_required   = [v[1] for v in COLUMN_DICT.values()]
-    ensure_columns(df_c, custody_required, "Custody")
-    ensure_columns(df_n, nbim_required,   "NBIM")
-
-    # Select only columns we will use (keeps runtime clean)
-    df_c_sel = df_c[[v[0] for v in COLUMN_DICT.values()]].copy()
-    df_n_sel = df_n[[v[1] for v in COLUMN_DICT.values()]].copy()
-
-    # Rename to a common schema (business names)
-    rename_c = {v[0]: k for k, v in COLUMN_DICT.items()}
-    rename_n = {v[1]: k for k, v in COLUMN_DICT.items()}
-    c_std = df_c_sel.rename(columns=rename_c)
-    n_std = df_n_sel.rename(columns=rename_n)
-
-    # Ensure keys present
-    for k in ["COAC_EVENT_KEY", "BANK_ACCOUNTS"]:
-        if k not in c_std.columns or k not in n_std.columns:
-            raise KeyError(f"Required key '{k}' missing after normalization.")
-
-    # Some datasets might have duplicates on key-pair. We'll keep the first to allow strict, row-level comparison.
-    c_std = c_std.drop_duplicates(subset=["COAC_EVENT_KEY", "BANK_ACCOUNTS"], keep="first")
-    n_std = n_std.drop_duplicates(subset=["COAC_EVENT_KEY", "BANK_ACCOUNTS"], keep="first")
-
-    # Outer-join on the exact business keys
-    merged = c_std.merge(
-        n_std,
-        on=["COAC_EVENT_KEY", "BANK_ACCOUNTS"],
-        how="outer",
-        suffixes=("_C", "_N"),
-        indicator=True
+    merged = csmall[[KEY_COAC, KEY_BANK]].merge(
+        nsmall[[KEY_COAC, KEY_BANK]], on=[KEY_COAC, KEY_BANK], how="outer", indicator=True
     )
 
-    # Prepare output rows
-    out_rows: List[Dict[str, Any]] = []
+    rows = []
 
-    # 3a) Missing on one side
-    # _merge values: 'left_only' => only in custody; 'right_only' => only in NBIM; 'both' => matched
-    missing_cust = merged[merged["_merge"] == "right_only"]
-    for _, r in missing_cust.iterrows():
-        out_rows.append({
-            "COAC_EVENT_KEY": r["COAC_EVENT_KEY"],
-            "BANK_ACCOUNTS":  r["BANK_ACCOUNTS"],
-            "BREAK_TYPE":     "missing at Custody",
-            "COLUMN":         "",
-            "CUSTODY_VALUE":  "",
-            "NBIM_VALUE":     "",
-        })
+    # 4) Missing keys
+    left_only = merged[merged["_merge"] == "left_only"]
+    for _, r in left_only.iterrows():
+        rows.append({KEY_COAC: r[KEY_COAC], KEY_BANK: r[KEY_BANK], "status": "missing at NBIM", "reason": "Key present in Custody only."})
+    right_only = merged[merged["_merge"] == "right_only"]
+    for _, r in right_only.iterrows():
+        rows.append({KEY_COAC: r[KEY_COAC], KEY_BANK: r[KEY_BANK], "status": "missing at Custody", "reason": "Key present in NBIM only."})
 
-    missing_nbim = merged[merged["_merge"] == "left_only"]
-    for _, r in missing_nbim.iterrows():
-        out_rows.append({
-            "COAC_EVENT_KEY": r["COAC_EVENT_KEY"],
-            "BANK_ACCOUNTS":  r["BANK_ACCOUNTS"],
-            "BREAK_TYPE":     "missing at NBIM",
-            "COLUMN":         "",
-            "CUSTODY_VALUE":  "",
-            "NBIM_VALUE":     "",
-        })
+    # 5) Key pairs present on both sides: compare the explicit pairs
+    both = merged[merged["_merge"] == "both"][[KEY_COAC, KEY_BANK]]
+    if not both.empty:
+        # Index for efficient row lookups
+        cidx = csmall.set_index([KEY_COAC, KEY_BANK])
+        nidx = nsmall.set_index([KEY_COAC, KEY_BANK])
+        for key_vals in both.itertuples(index=False):
+            k1, k2 = key_vals
+            try:
+                crow = cidx.loc[(k1, k2)]
+                nrow = nidx.loc[(k1, k2)]
+            except KeyError:
+                # If either side is missing unexpectedly, skip (already reported)
+                continue
 
-    # 3b) Mismatches for pairs present in both
-    both = merged[merged["_merge"] == "both"].copy()
-    compare_fields = [k for k in COLUMN_DICT.keys() if k not in ("COAC_EVENT_KEY", "BANK_ACCOUNTS")]
+            mismatches = []
+            reasons = []
+            for left_name, right_name, kind in COMPARE_MAP:
+                if left_name in ("COAC_EVENT_KEY","BANK_ACCOUNTS"):  # skip the key columns; already matched
+                    continue
+                # Resolve the actual df columns on each side using the alias machinery
+                lc = _find_col(csmall, left_name)
+                rc = _find_col(nsmall, right_name)
+                if lc is None or rc is None:
+                    # Report missing columns as mismatches for visibility
+                    miss = left_name if lc is None else right_name
+                    mismatches.append(f"{left_name}~{right_name}")
+                    reasons.append(f"{left_name} vs {right_name}: missing column '{miss}'")
+                    continue
 
-    for _, row in both.iterrows():
-        for field in compare_fields:
-            c_val = row.get(f"{field}_C")
-            n_val = row.get(f"{field}_N")
-            if not values_equal(field, c_val, n_val, DATE_FIELDS, CURRENCY_FIELDS, NUMERIC_FIELDS, NUM_TOL):
-                out_rows.append({
-                    "COAC_EVENT_KEY": row["COAC_EVENT_KEY"],
-                    "BANK_ACCOUNTS":  row["BANK_ACCOUNTS"],
-                    "BREAK_TYPE":     "mismatch",
-                    "COLUMN":         field,
-                    "CUSTODY_VALUE":  c_val,
-                    "NBIM_VALUE":     n_val,
+                v1 = crow[lc] if lc in crow.index else None
+                v2 = nrow[rc] if rc in nrow.index else None
+                if not _values_equal_by_type(v1, v2, kind):
+                    mismatches.append(f"{left_name}~{right_name}")
+                    reasons.append(f"{left_name}={v1} vs {right_name}={v2}")
+
+            if mismatches:
+                rows.append({
+                    KEY_COAC: k1,
+                    KEY_BANK: k2,
+                    "status": "mismatch",
+                    "reason": "; ".join(reasons)[:2000],
+                    "mismatch_columns": ",".join(mismatches)
                 })
 
-    # Build output DataFrame (LLM-friendly long format: one break per row)
-    out_df = pd.DataFrame(out_rows, columns=[
-        "COAC_EVENT_KEY", "BANK_ACCOUNTS", "BREAK_TYPE", "COLUMN", "CUSTODY_VALUE", "NBIM_VALUE"
-    ])
-
-    # Save
+    # Emit the tidy CSV
+    out_df = pd.DataFrame(rows).drop_duplicates().reset_index(drop=True)
     out_df.to_csv(out_csv, index=False)
-    print(f"Done. Breaks saved to: {out_csv}")
-    print(f"Total breaks: {len(out_df)}")
-    return out_csv
+    return Path(out_csv)
