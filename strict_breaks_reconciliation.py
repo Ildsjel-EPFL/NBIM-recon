@@ -243,15 +243,3 @@ def reconcile_breaks(custody_csv: Path, nbim_csv: Path, out_csv: Path = "breaks_
     print(f"Done. Breaks saved to: {out_csv}")
     print(f"Total breaks: {len(out_df)}")
     return out_csv
-
-# ---------------------------
-# 4) CLI
-# ---------------------------
-# if __name__ == "__main__":
-#     ap = argparse.ArgumentParser(description="Strict breaks reconciliation using an explicit column dictionary.")
-#     ap.add_argument("--custody", type=Path, required=True, help="Custody CSV file path")
-#     ap.add_argument("--nbim",    type=Path, required=True, help="NBIM CSV file path")
-#     ap.add_argument("--out",     type=Path, default=Path("breaks_flags.csv"), help="Output CSV filename")
-#     args = ap.parse_args()
-
-#     reconcile_breaks(args.custody, args.nbim, args.out)
