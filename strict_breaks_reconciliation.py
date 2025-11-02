@@ -1,22 +1,19 @@
-#!/usr/bin/env python
-# -*- coding: utf-8 -*-
-# -----------------------------------------------------------------------------
-# strict_breaks_reconciliation.py
-# Strict (deterministic) reconciliation using explicit column mapping.
-#
-# Responsibilities:
-# - Read semicolon- or comma-delimited CSVs; normalize dates, numbers and currencies.
-# - Join datasets on (COAC_EVENT_KEY, BANK_ACCOUNTS/ACCOUNT) with robust aliasing.
-# - Compare EXACTLY the column pairs provided by the business (see COMPARE_MAP).
-# - Produce 'breaks_flags.csv' with: status, mismatch reasons, and which pairs failed.
-#
-# Key design choices:
-# - We avoid comparing "custodian name" type fields (handled upstream in utils_io for general comparisons).
-# - Explicit mapping is used instead of "column intersection" so we never miss a requested field pair.
-# - Aliases are symmetric where appropriate so variations (e.g., EX_DATE vs EXDATE) are recognized.
-# - Type-aware comparison: dates exact post-normalization; currencies case-insensitive;
-#   money with ±0.01 tolerance; rates with ±1e-4.
-# -----------------------------------------------------------------------------
+"""### strict_breaks_reconciliation.py
+Strict (deterministic) reconciliation using explicit column mapping.
+
+Responsibilities:
+- Read semicolon- or comma-delimited CSVs; normalize dates, numbers and currencies.
+- Join datasets on (COAC_EVENT_KEY, BANK_ACCOUNTS/ACCOUNT) with robust aliasing.
+- Compare EXACTLY the column pairs provided by the business (see COMPARE_MAP).
+- Produce 'breaks_flags.csv' with: status, mismatch reasons, and which pairs failed.
+
+Key design choices:
+- We avoid comparing "custodian name" type fields (handled upstream in utils_io for general comparisons).
+- Explicit mapping is used instead of "column intersection" so we never miss a requested field pair.
+- Aliases are symmetric where appropriate so variations (e.g., EX_DATE vs EXDATE) are recognized.
+- Type-aware comparison: dates exact post-normalization; currencies case-insensitive;
+  money with ±0.01 tolerance; rates with ±1e-4.
+-----------------------------------------------------------------------------"""
 
 from __future__ import annotations
 from pathlib import Path

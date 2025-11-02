@@ -1,9 +1,0 @@
-# Dividend Reconciliation Playbook (Short)
-- Small rounding differences (< 0.01 in local currency) are usually harmless and can be accepted or adjusted.
-- Larger amount mismatches often stem from incorrect share balances, FX conversions, or special dividend types (e.g., ADR fees).
-- Currency mismatches can occur if custodian pays in local currency while internal system expects base currency (or vice versa).
-- Missing at Custody: check event confirmation, market holidays, or if the event is paid in multiple tranches.
-- Missing at NBIM: the custodian might have an early/later pay-date update; check latest corporate action notifications.
-- Withholding tax differences frequently come from residence status, treaty rates, or gross-up rounding.
-- Always verify security identifiers (ISIN, local code), ex-/record-/payment dates, and entitled shares.
-- For persistent breaks, request the custodian to send SWIFT CA messages or an itemized calculation.
