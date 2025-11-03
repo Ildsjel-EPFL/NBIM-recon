@@ -42,35 +42,6 @@ OUTPUT_COST_PER_1K=0.015
 
 ---
 
-## Explicit mapping (Custody → NBIM)
-
-The project compares **exactly** these pairs for each matched `(COAC_EVENT_KEY, BANK_ACCOUNT(S))`.  
-Header **aliases** are supported (e.g., `EX_DATE` ↔ `EXDATE`, `BANK_ACCOUNT` ↔ `BANK_ACCOUNTS`).
-
-| Custody            | NBIM                      | Type      |
-|--------------------|---------------------------|-----------|
-| COAC_EVENT_KEY     | COAC_EVENT_KEY            | text      |
-| BANK_ACCOUNTS      | BANK_ACCOUNT              | text      |
-| ISIN               | ISIN                      | text      |
-| SEDOL              | SEDOL                     | text      |
-| NOMINAL_BASIS      | NOMINAL_BASIS             | text      |
-| EX_DATE            | EXDATE                    | date      |
-| PAY_DATE           | PAYMENT_DATE              | date      |
-| CURRENCIES         | QUOTATION_CURRENCY        | currency  |
-| DIV_RATE           | DIVIDENDS_PER_SHARE       | rate      |
-| TAX_RATE           | WTHTAX_RATE               | rate      |
-| GROSS_AMOUNT       | GROSS_AMOUNT_QUOTATION    | money     |
-| NET_AMOUNT_QC      | NET_AMOUNT_QUOTATION      | money     |
-| TAX                | WTHTAX_COST_QUOTATION     | money     |
-| NET_AMOUNT_SC      | NET_AMOUNT_SETTLEMENT     | money     |
-| SETTLED_CURRENCY   | SETTLEMENT_CURRENCY       | currency  |
-
-> Keys are resolved with robust aliases on **both** sides:
-> - NBIM may provide `BANK_ACCOUNTS` instead of `BANK_ACCOUNT` (and vice versa); both are recognized.
-> - Same for `EX_DATE`/`EXDATE`, `PAY_DATE`/`PAYMENT_DATE`, etc.
-
----
-
 ## How it works
 
 ### 1) Strict pass (`strict_breaks_reconciliation.py`)
@@ -104,6 +75,36 @@ Header **aliases** are supported (e.g., `EX_DATE` ↔ `EXDATE`, `BANK_ACCOUNT` �
 - Shows the enriched table, with **download paths** for both CSVs.
 
 ---
+
+## Explicit mapping (Custody → NBIM)
+
+The project compares **exactly** these pairs for each matched `(COAC_EVENT_KEY, BANK_ACCOUNT(S))`.  
+Header **aliases** are supported (e.g., `EX_DATE` ↔ `EXDATE`, `BANK_ACCOUNT` ↔ `BANK_ACCOUNTS`).
+
+| Custody            | NBIM                      | Type      |
+|--------------------|---------------------------|-----------|
+| COAC_EVENT_KEY     | COAC_EVENT_KEY            | text      |
+| BANK_ACCOUNTS      | BANK_ACCOUNT              | text      |
+| ISIN               | ISIN                      | text      |
+| SEDOL              | SEDOL                     | text      |
+| NOMINAL_BASIS      | NOMINAL_BASIS             | text      |
+| EX_DATE            | EXDATE                    | date      |
+| PAY_DATE           | PAYMENT_DATE              | date      |
+| CURRENCIES         | QUOTATION_CURRENCY        | currency  |
+| DIV_RATE           | DIVIDENDS_PER_SHARE       | rate      |
+| TAX_RATE           | WTHTAX_RATE               | rate      |
+| GROSS_AMOUNT       | GROSS_AMOUNT_QUOTATION    | money     |
+| NET_AMOUNT_QC      | NET_AMOUNT_QUOTATION      | money     |
+| TAX                | WTHTAX_COST_QUOTATION     | money     |
+| NET_AMOUNT_SC      | NET_AMOUNT_SETTLEMENT     | money     |
+| SETTLED_CURRENCY   | SETTLEMENT_CURRENCY       | currency  |
+
+> Keys are resolved with robust aliases on **both** sides:
+> - NBIM may provide `BANK_ACCOUNTS` instead of `BANK_ACCOUNT` (and vice versa); both are recognized.
+> - Same for `EX_DATE`/`EXDATE`, `PAY_DATE`/`PAYMENT_DATE`, etc.
+
+---
+
 ## Prompt and playbook 
 Prompt for each OpenAI API call:
 ```markdown
