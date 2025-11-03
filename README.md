@@ -1,6 +1,6 @@
-# NBIM Dividend Reconciliation (Strict + LLM)
+# LLM-Powered Dividend Reconciliation System
 
-A small, production-minded demo that reconciles **Custody** vs **NBIM** dividend data using a **deterministic (strict)** pass and an **LLM enrichment** pass.  
+A small demo that reconciles **Custody** vs **NBIM** dividend data using a **deterministic (strict)** pass and an **LLM enrichment** pass.  
 It supports **semicolon-separated CSVs**, **locale-aware numbers**, **date normalization with day-first inference**, and an **explicit, auditable field mapping** between the two datasets.
 
 > The UI (Gradio) runs the strict comparison first, then **automatically** runs the LLM enrichment and shows both results with download links.
